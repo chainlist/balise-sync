@@ -21,7 +21,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   // The Tauri client calls these endpoints from its webview, so it needs CORS.
   // Auth is signature-based with no cookies, so reflecting the origin is safe;
   // the custom X-* auth headers are allowed via the reflected preflight.
-  await app.register(cors, { origin: true });
+  await app.register(cors, { origin: true, methods: ['GET', 'POST', 'DELETE'] });
 
   await app.register(websocket);
 

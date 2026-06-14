@@ -45,4 +45,11 @@ export async function pairingRoutes(app: FastifyInstance): Promise<void> {
   app.get('/peers', { preHandler: requireSignature }, async (req) => {
     return paired.getPeers(req.device!.id);
   });
+
+  // Remove the pairing edge between the caller and one of its peers. Idempotent.
+  app.delete('/peers/:peerId', { preHandler: requireSignature }, async (req, reply) => {
+    const { peerId } = req.params as { peerId: string };
+    pairingService.unpair(req.device!.id, peerId);
+    return reply.code(204).send();
+  });
 }

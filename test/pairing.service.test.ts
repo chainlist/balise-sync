@@ -47,4 +47,15 @@ describe('pairingService', () => {
     const { code } = pairingService.createPairingCode(a.id);
     expect(() => pairingService.claim({ code, deviceId: a.id })).toThrow();
   });
+
+  it('unpairs two paired devices regardless of order', () => {
+    const a = pairingService.register('77'.repeat(32));
+    const b = pairingService.register('88'.repeat(32));
+    const { code } = pairingService.createPairingCode(a.id);
+    pairingService.claim({ code, deviceId: b.id });
+
+    // Either side can remove the edge; both then see no peers.
+    expect(pairingService.unpair(b.id, a.id)).toBe(true);
+    expect(pairingService.unpair(b.id, a.id)).toBe(false);
+  });
 });

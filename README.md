@@ -107,6 +107,7 @@ signature is over the nonce's raw bytes.
 | POST   | `/pairing/codes`   | deviceId  | Mint a short-lived, single-use pairing code      |
 | POST   | `/pairing/claim`   | deviceId  | Redeem a code; creates the pairing edge          |
 | GET    | `/peers`           | deviceId  | List paired peers (refresh the local trust set)  |
+| DELETE | `/peers/:peerId`   | deviceId  | Remove the pairing edge with a peer (idempotent) |
 | GET    | `/health`          | none      | Liveness + current connection count              |
 
 ### Pairing flow

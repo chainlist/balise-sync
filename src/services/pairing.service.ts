@@ -60,6 +60,11 @@ class PairingService {
     paired.addPair(owner.id, input.deviceId);
     return { peer: { deviceId: owner.id, publicKey: owner.publicKey } };
   }
+
+  /** Remove the pairing edge between a device and one of its peers. Idempotent. */
+  unpair(deviceId: string, peerDeviceId: string): boolean {
+    return paired.removePair(deviceId, peerDeviceId);
+  }
 }
 
 export const pairingService = new PairingService();
