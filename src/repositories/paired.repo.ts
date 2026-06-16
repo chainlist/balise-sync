@@ -5,10 +5,9 @@ const insert = db.prepare(
   'INSERT OR IGNORE INTO paired (device_a, device_b, created_at) VALUES (?, ?, ?)',
 );
 const peersStmt = db.prepare(`
-  SELECT d.id AS deviceId, d.public_key AS publicKey
-  FROM paired p
-  JOIN devices d ON d.id = CASE WHEN p.device_a = @id THEN p.device_b ELSE p.device_a END
-  WHERE p.device_a = @id OR p.device_b = @id
+  SELECT CASE WHEN device_a = @id THEN device_b ELSE device_a END AS publicKey
+  FROM paired
+  WHERE device_a = @id OR device_b = @id
 `);
 const pairStmt = db.prepare('SELECT 1 FROM paired WHERE device_a = ? AND device_b = ? LIMIT 1');
 const remove = db.prepare('DELETE FROM paired WHERE device_a = ? AND device_b = ?');
@@ -23,8 +22,8 @@ export function addPair(deviceX: string, deviceY: string): void {
   insert.run(a, b, Date.now());
 }
 
-export function getPeers(deviceId: string): Peer[] {
-  return peersStmt.all({ id: deviceId }) as Peer[];
+export function getPeers(publicKey: string): Peer[] {
+  return peersStmt.all({ id: publicKey }) as Peer[];
 }
 
 export function arePaired(deviceX: string, deviceY: string): boolean {

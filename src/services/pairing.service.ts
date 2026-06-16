@@ -30,40 +30,39 @@ function generateCode(): string {
 }
 
 class PairingService {
-  /** Register a device by its public key (idempotent: returns the existing one). */
+  /** Register a device by its public key (idempotent). */
   register(publicKey: string): Device {
-    return devices.getDeviceByPublicKey(publicKey) ?? devices.createDevice(publicKey);
+    return devices.ensureDevice(publicKey);
   }
 
-  /** A registered device mints a short-lived, single-use code to pair a new device. */
-  createPairingCode(deviceId: string): { code: string; expiresAt: number } {
+  /** A device mints a short-lived, single-use code to pair a new device. */
+  createPairingCode(publicKey: string): { code: string; expiresAt: number } {
+    devices.ensureDevice(publicKey);
     const code = generateCode();
     const expiresAt = Date.now() + config.pairingCodeTtlSeconds * 1000;
-    pairing.createCode({ code, deviceId, expiresAt });
+    pairing.createCode({ code, publicKey, expiresAt });
     return { code, expiresAt };
   }
 
   /** Redeem a code: create the pairing edge and return the code owner as a peer. */
-  claim(input: { code: string; deviceId: string }): { peer: Peer } {
+  claim(input: { code: string; publicKey: string }): { peer: Peer } {
     const row = pairing.getCode(input.code);
     if (!row) throw new PairingError('invalid_code', 'Unknown pairing code');
     if (row.used) throw new PairingError('used_code', 'Pairing code already used');
     if (row.expiresAt < Date.now()) throw new PairingError('expired_code', 'Pairing code expired');
-    if (row.deviceId === input.deviceId) {
+    if (row.publicKey === input.publicKey) {
       throw new PairingError('self_pair', 'Cannot pair a device with itself');
     }
 
-    const owner = devices.getDeviceById(row.deviceId);
-    if (!owner) throw new PairingError('invalid_code', 'Pairing code owner no longer exists');
-
+    devices.ensureDevice(input.publicKey);
     pairing.markUsed(input.code);
-    paired.addPair(owner.id, input.deviceId);
-    return { peer: { deviceId: owner.id, publicKey: owner.publicKey } };
+    paired.addPair(row.publicKey, input.publicKey);
+    return { peer: { publicKey: row.publicKey } };
   }
 
   /** Remove the pairing edge between a device and one of its peers. Idempotent. */
-  unpair(deviceId: string, peerDeviceId: string): boolean {
-    return paired.removePair(deviceId, peerDeviceId);
+  unpair(publicKey: string, peerPublicKey: string): boolean {
+    return paired.removePair(publicKey, peerPublicKey);
   }
 }
 

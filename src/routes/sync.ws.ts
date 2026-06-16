@@ -4,8 +4,6 @@ import { ClientMessageSchema, type ServerMessage } from '../types/messages.js';
 import { presenceService } from '../services/presence.service.js';
 import { signalingService } from '../services/signaling.service.js';
 import { randomNonce, verifySignature } from '../utils/signature.js';
-import * as devices from '../repositories/devices.repo.js';
-import type { Device } from '../types/domain.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const AUTH_TIMEOUT_MS = 10_000;
@@ -42,11 +40,11 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
     // The connection starts unauthenticated. The device must sign this nonce
     // before any signaling is accepted. The nonce is single-use per connection.
     const nonce = randomNonce();
-    let device: Device | undefined;
+    let publicKey: string | undefined;
     send(socket, { type: 'challenge', nonce });
 
     const authTimer = setTimeout(() => {
-      if (!device) socket.close(4401, 'authentication timeout');
+      if (!publicKey) socket.close(4401, 'authentication timeout');
     }, AUTH_TIMEOUT_MS);
 
     socket.on('message', (raw) => {
@@ -66,34 +64,32 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
       const message = parsed.data;
 
       // Until authenticated, only an 'auth' message is accepted.
-      if (!device) {
+      if (!publicKey) {
         if (message.type !== 'auth') {
           socket.close(4401, 'authentication required');
           return;
         }
-        const found = devices.getDeviceById(message.deviceId);
-        const valid =
-          found !== undefined &&
-          verifySignature(found.publicKey, Buffer.from(nonce, 'hex'), message.signature);
-        if (!found || !valid) {
+        // Stateless: verify the signature against the presented key directly.
+        // No device lookup, so a server reset never strands a valid connection.
+        if (!verifySignature(message.publicKey, Buffer.from(nonce, 'hex'), message.signature)) {
           socket.close(4401, 'unauthorized');
           return;
         }
-        device = found;
+        publicKey = message.publicKey;
         clearTimeout(authTimer);
-        presenceService.register(device.id, socket);
-        send(socket, { type: 'hello', deviceId: device.id });
+        presenceService.register(publicKey, socket);
+        send(socket, { type: 'hello' });
         return;
       }
 
       switch (message.type) {
         case 'sync-request': {
-          const { online, offline } = signalingService.requestSync(device, message.node);
+          const { online, offline } = signalingService.requestSync(publicKey, message.node);
           send(socket, { type: 'sync-targets', online, offline });
           break;
         }
         case 'ready': {
-          const delivered = signalingService.relayReady(device, message.to, message.node);
+          const delivered = signalingService.relayReady(publicKey, message.to, message.node);
           if (!delivered) send(socket, { type: 'error', message: 'peer not reachable' });
           break;
         }
@@ -105,7 +101,7 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
 
     socket.on('close', () => {
       clearTimeout(authTimer);
-      if (device) presenceService.unregister(device.id, socket);
+      if (publicKey) presenceService.unregister(publicKey, socket);
     });
   });
 }
