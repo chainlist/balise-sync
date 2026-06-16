@@ -9,7 +9,6 @@ const peersStmt = db.prepare(`
   FROM paired
   WHERE device_a = @id OR device_b = @id
 `);
-const pairStmt = db.prepare('SELECT 1 FROM paired WHERE device_a = ? AND device_b = ? LIMIT 1');
 const remove = db.prepare('DELETE FROM paired WHERE device_a = ? AND device_b = ?');
 
 /** Normalize so a pair is stored once regardless of initiator. */
@@ -24,11 +23,6 @@ export function addPair(deviceX: string, deviceY: string): void {
 
 export function getPeers(publicKey: string): Peer[] {
   return peersStmt.all({ id: publicKey }) as Peer[];
-}
-
-export function arePaired(deviceX: string, deviceY: string): boolean {
-  const [a, b] = order(deviceX, deviceY);
-  return pairStmt.get(a, b) !== undefined;
 }
 
 export function removePair(deviceX: string, deviceY: string): boolean {

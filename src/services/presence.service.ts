@@ -1,5 +1,6 @@
 import type { WebSocket } from 'ws';
 import type { ServerMessage } from '../types/messages.js';
+import { safeSend } from '../utils/ws.js';
 
 /**
  * Tracks which devices currently hold a live WebSocket, and pushes messages to them.
@@ -36,9 +37,8 @@ class PresenceService {
   /** Send a message to a device. Returns false if it isn't currently reachable. */
   publish(deviceId: string, message: ServerMessage): boolean {
     const socket = this.#connections.get(deviceId);
-    if (!socket || socket.readyState !== socket.OPEN) return false;
-    socket.send(JSON.stringify(message));
-    return true;
+    if (!socket) return false;
+    return safeSend(socket, message);
   }
 
   get size(): number {

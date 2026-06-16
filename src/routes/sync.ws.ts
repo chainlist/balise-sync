@@ -1,19 +1,18 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { WebSocket } from 'ws';
+import type { RawData, WebSocket } from 'ws';
 import { ClientMessageSchema, type ServerMessage } from '../types/messages.js';
+import { config } from '../config.js';
 import { presenceService } from '../services/presence.service.js';
 import { signalingService } from '../services/signaling.service.js';
+import { wsMetricsService } from '../services/ws-metrics.service.js';
 import { randomNonce, verifySignature } from '../utils/signature.js';
+import { payloadSize, safeSend } from '../utils/ws.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const AUTH_TIMEOUT_MS = 10_000;
 
 /** Liveness flag we tack onto each socket for the heartbeat sweep. */
 type TrackedSocket = WebSocket & { isAlive?: boolean };
-
-function send(socket: WebSocket, message: ServerMessage): void {
-  socket.send(JSON.stringify(message));
-}
 
 export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
   // Detect and reap dead connections (NATs silently drop idle TCP sessions).
@@ -32,33 +31,58 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
   app.addHook('onClose', async () => clearInterval(heartbeat));
 
   app.get('/sync', { websocket: true }, (socket: TrackedSocket, _req: FastifyRequest) => {
+    wsMetricsService.recordConnectionAccepted();
     socket.isAlive = true;
     socket.on('pong', () => {
       socket.isAlive = true;
+    });
+    socket.on('error', (error: Error) => {
+      wsMetricsService.recordConnectionError();
+      app.log.warn({ err: error, publicKey }, 'websocket connection error');
     });
 
     // The connection starts unauthenticated. The device must sign this nonce
     // before any signaling is accepted. The nonce is single-use per connection.
     const nonce = randomNonce();
     let publicKey: string | undefined;
-    send(socket, { type: 'challenge', nonce });
+    if (!safeSend(socket, { type: 'challenge', nonce })) return;
 
     const authTimer = setTimeout(() => {
-      if (!publicKey) socket.close(4401, 'authentication timeout');
+      if (!publicKey) {
+        wsMetricsService.recordAuthTimeout();
+        socket.close(4401, 'authentication timeout');
+      }
     }, AUTH_TIMEOUT_MS);
 
-    socket.on('message', (raw) => {
+    socket.on('message', (raw: RawData, isBinary: boolean) => {
+      const bytes = payloadSize(raw);
+      wsMetricsService.recordMessageReceived(bytes);
+
+      if (isBinary) {
+        wsMetricsService.recordInvalidMessage();
+        socket.close(1003, 'binary frames are not supported');
+        return;
+      }
+
+      if (bytes > config.wsMaxPayloadBytes) {
+        wsMetricsService.recordOversizedMessage();
+        socket.close(1009, 'message too large');
+        return;
+      }
+
       let json: unknown;
       try {
         json = JSON.parse(raw.toString());
       } catch {
-        send(socket, { type: 'error', message: 'invalid message' });
+        wsMetricsService.recordInvalidMessage();
+        safeSend(socket, { type: 'error', message: 'invalid message' });
         return;
       }
 
       const parsed = ClientMessageSchema.safeParse(json);
       if (!parsed.success) {
-        send(socket, { type: 'error', message: 'invalid message' });
+        wsMetricsService.recordInvalidMessage();
+        safeSend(socket, { type: 'error', message: 'invalid message' });
         return;
       }
       const message = parsed.data;
@@ -78,19 +102,14 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
         publicKey = message.publicKey;
         clearTimeout(authTimer);
         presenceService.register(publicKey, socket);
-        send(socket, { type: 'hello' });
+        safeSend(socket, { type: 'hello' });
         return;
       }
 
       switch (message.type) {
         case 'sync-request': {
-          const { online, offline } = signalingService.requestSync(publicKey, message.node);
-          send(socket, { type: 'sync-targets', online, offline });
-          break;
-        }
-        case 'ready': {
-          const delivered = signalingService.relayReady(publicKey, message.to, message.node);
-          if (!delivered) send(socket, { type: 'error', message: 'peer not reachable' });
+          const { online, offline } = signalingService.requestSync(publicKey);
+          safeSend(socket, { type: 'sync-targets', online, offline });
           break;
         }
         case 'auth':
@@ -100,6 +119,7 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
     });
 
     socket.on('close', () => {
+      wsMetricsService.recordConnectionClosed();
       clearTimeout(authTimer);
       if (publicKey) presenceService.unregister(publicKey, socket);
     });
