@@ -34,6 +34,16 @@ class PresenceService {
     return this.#connections.has(deviceId);
   }
 
+  /** The device ids that currently hold a live socket. */
+  deviceIds(): string[] {
+    return [...this.#connections.keys()];
+  }
+
+  /** Force-close a device's socket; the `close` handler unregisters it. */
+  disconnect(deviceId: string, code: number, reason: string): void {
+    this.#connections.get(deviceId)?.close(code, reason);
+  }
+
   /** Send a message to a device. Returns false if it isn't currently reachable. */
   publish(deviceId: string, message: ServerMessage): boolean {
     const socket = this.#connections.get(deviceId);

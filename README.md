@@ -16,30 +16,25 @@ starts. The heavy data is P2P, so the server only ever moves tiny control messag
 ## Authentication: sign a nonce, no tokens
 
 A device's identity is its Ed25519 keypair (the same key that is its iroh NodeId). There is no
-password or bearer token. To authenticate, a device proves it holds the private key by signing a
-one-time server challenge:
+password, bearer token, or server-minted id. To authenticate, a device proves it holds the private
+key by signing a one-time server challenge:
 
 1. `POST /auth/challenge` returns a random `nonce` (no body needed).
 2. The device signs the nonce's raw bytes with its private key.
-3. It sends `nonce` + `signature` plus an identifier; the server verifies the signature.
+3. It sends `X-Public-Key` + `X-Nonce` + `X-Signature`; the server verifies the signature against
+   the **presented** public key.
 
-The identifier differs by phase:
-
-- **Registration** (`POST /devices`): the device isn't stored yet, so it sends its **public key**
-  (`X-Public-Key`) and the server verifies against that, proving key ownership.
-- **Every later call**: the device sends its **deviceId** (`X-Device-Id`), and the server verifies
-  against the public key it **stored at registration** - never a key from the request. This also
-  sends less over the wire (a 36-char id vs a 64-char key) on every challenge round-trip.
-
-The server only ever stores public keys. Nonces are single-use and short-lived, so a captured
-signature cannot be replayed.
+Auth is therefore stateless: "you are whatever key you can sign for." It's the same on every
+endpoint (registration and later calls alike), needs no prior device lookup, and self-heals across
+a server reset or redeploy. The server only ever stores public keys, so there is no secret to leak,
+and nonces are single-use and short-lived, so a captured signature cannot be replayed.
 
 ## Data model
 
 ```sql
-devices       (id, public_key)              -- one row per device, public_key is its NodeId
-paired        (device_a, device_b)           -- undirected pairing edges (a < b, one row per pair)
-pairing_codes (code, device_id, expires_at)  -- short-lived, single-use
+devices       (public_key, created_at)                    -- one row per device; public_key is its NodeId and PK
+paired        (device_a, device_b, created_at)             -- undirected pairing edges (a < b, one row per pair), by public key
+pairing_codes (code, public_key, expires_at, used, ...)    -- short-lived, single-use
 ```
 
 There is no account/group concept: trust is the set of `paired` edges. When a device syncs, the
@@ -96,19 +91,19 @@ fresh install ever skips it, run `pnpm rebuild better-sqlite3` (or `pnpm approve
 
 ## REST API
 
-Auth headers carry `X-Nonce` + `X-Signature` (hex) plus an identifier: `X-Public-Key` for
-registration, `X-Device-Id` for every later call. The nonce comes from `/auth/challenge` and the
-signature is over the nonce's raw bytes.
+Authenticated calls carry `X-Public-Key` + `X-Nonce` + `X-Signature` (all hex). The nonce comes
+from `/auth/challenge` and the signature is over the nonce's raw bytes. It's the same on every
+authenticated endpoint.
 
-| Method | Path               | Auth      | Purpose                                          |
-| ------ | ------------------ | --------- | ------------------------------------------------ |
-| POST   | `/auth/challenge`  | none      | Get a one-time nonce to sign                     |
-| POST   | `/devices`         | publicKey | Register a device (proves key ownership)         |
-| POST   | `/pairing/codes`   | deviceId  | Mint a short-lived, single-use pairing code      |
-| POST   | `/pairing/claim`   | deviceId  | Redeem a code; creates the pairing edge          |
-| GET    | `/peers`           | deviceId  | List paired peers (refresh the local trust set)  |
-| DELETE | `/peers/:peerId`   | deviceId  | Remove the pairing edge with a peer (idempotent) |
-| GET    | `/health`          | none      | Liveness + current connection count              |
+| Method | Path               | Auth   | Purpose                                          |
+| ------ | ------------------ | ------ | ------------------------------------------------ |
+| POST   | `/auth/challenge`  | none   | Get a one-time nonce to sign                     |
+| POST   | `/devices`         | signed | Register a device (proves key ownership)         |
+| POST   | `/pairing/codes`   | signed | Mint a short-lived, single-use pairing code      |
+| POST   | `/pairing/claim`   | signed | Redeem a code; creates the pairing edge          |
+| GET    | `/peers`           | signed | List paired peers (refresh the local trust set)  |
+| DELETE | `/peers/:peerKey`  | signed | Remove the pairing edge with a peer (idempotent) |
+| GET    | `/health`          | none   | Liveness + current connection count              |
 
 ### Pairing flow
 
@@ -120,33 +115,52 @@ signature is over the nonce's raw bytes.
 ## WebSocket `/sync`
 
 On connect the server sends a `challenge`. The device must reply with `auth` (signing the nonce)
-before any signaling is accepted; it has 10s to do so.
+before any signaling is accepted; it has 10s to do so. The control plane only ever exchanges public
+keys, never network addresses: peers dial each other by NodeId and let iroh's relays/discovery
+resolve the route.
 
 **Client → server**
 
 ```jsonc
 // authenticate by signing the challenge nonce
-{ "type": "auth", "deviceId": "...", "signature": "..." }
+{ "type": "auth", "publicKey": "...", "signature": "..." }
 
-// "I want to sync": wake my online peers and tell them how to reach me
-{ "type": "sync-request", "node": { "nodeId": "...", "relayUrl": "...", "directAddresses": [] } }
+// "I want to sync": wake my online paired peers so they bring up iroh
+{ "type": "sync-request" }
 
-// "I'm awake and discoverable": relay my address back to the initiator
-{ "type": "ready", "to": "<initiator deviceId>", "node": { "nodeId": "...", "relayUrl": "..." } }
+// "I'm up": my iroh endpoint is live; tell the initiator to dial me now
+{ "type": "ready", "to": "<initiator publicKey>" }
 ```
 
 **Server → client**
 
 ```jsonc
-{ "type": "challenge", "nonce": "..." }                              // sign this to authenticate
-{ "type": "hello", "deviceId": "..." }                               // auth accepted, you're online
-{ "type": "wake", "from": "<initiator deviceId>", "node": { ... } }  // wake up and become discoverable
-{ "type": "peer-ready", "from": "<peer deviceId>", "node": { ... } } // a peer is up; connect over iroh
-{ "type": "sync-targets", "online": ["..."], "offline": ["..."] }    // who got the wake
+{ "type": "challenge", "nonce": "..." }                            // sign this to authenticate
+{ "type": "hello" }                                                // auth accepted, you're online
+{ "type": "wake", "from": "<initiator publicKey>" }                // a peer wants to sync: bring up iroh
+{ "type": "peer-ready", "from": "<peer publicKey>" }               // that peer is up; dial it over iroh
+{ "type": "sync-targets", "online": ["..."], "offline": ["..."] }  // who got the wake
 { "type": "error", "message": "..." }
 ```
 
-Liveness is maintained with a 30s ping/pong sweep; dead sockets are reaped.
+### Wake handshake
+
+There is no fixed wait or address relay; the dial is driven by a `ready` signal, and a stable
+tiebreak on NodeId ensures a pair only ever connects once (no double dial):
+
+1. Initiator sends `sync-request`. The server `wake`s each online paired peer and replies with
+   `sync-targets` (who was reached).
+2. A woken peer brings up its iroh endpoint, then **the lower-NodeId device of the pair dials the
+   other directly**; the higher-NodeId device instead sends `ready` and waits to be dialed.
+3. When a peer sends `ready`, the server relays it to the initiator as `peer-ready`, and the
+   initiator (which is the lower-NodeId side in that case) dials over iroh immediately.
+
+Both ends compute the same NodeId ordering, so exactly one connection is made per pair regardless
+of who initiated or whether both sync at once. `ready` relay is pairing-scoped, so a device can
+only signal its paired peers.
+
+Liveness is a 30s ping/pong sweep that reaps dead sockets. The same sweep drops any authenticated
+socket whose device has no paired peers, since it can neither wake a peer nor be woken.
 
 ## Security model
 

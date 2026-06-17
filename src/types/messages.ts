@@ -10,6 +10,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), publicKey: z.string().min(1), signature: z.string().min(1) }),
   // "I want to sync" - wake my online paired peers so they bring up iroh.
   z.object({ type: z.literal('sync-request') }),
+  // "I'm up": a woken peer's endpoint is live; relay this to the initiator so it
+  // dials now instead of guessing when we're ready. `to` is the initiator's key.
+  z.object({ type: z.literal('ready'), to: z.string().min(1) }),
 ]);
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 
@@ -19,5 +22,6 @@ export type ServerMessage =
   | { type: 'challenge'; nonce: string }
   | { type: 'hello' }
   | { type: 'wake'; from: string }
+  | { type: 'peer-ready'; from: string }
   | { type: 'sync-targets'; online: string[]; offline: string[] }
   | { type: 'error'; message: string };

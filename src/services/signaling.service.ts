@@ -27,6 +27,31 @@ class SignalingService {
 
     return { online, offline };
   }
+
+  /**
+   * A woken peer reports its iroh endpoint is up. Relay that to the initiator so
+   * it dials immediately. Pairing-scoped: we only relay between paired devices,
+   * so a peer can't use this to ping an arbitrary key.
+   */
+  relayReady(peer: string, initiator: string): void {
+    const paired_with = paired.getPeers(peer).some((p) => p.publicKey === initiator);
+    if (!paired_with) return;
+    presenceService.publish(initiator, { type: 'peer-ready', from: peer });
+  }
+
+  /**
+   * Close sockets whose device has no paired peers: such a device can neither
+   * wake a peer nor be woken, so the connection is pure overhead. A real client
+   * only opens its socket once it has at least one paired peer, so this only ever
+   * reaps abusers and devices whose last peer just unpaired them.
+   */
+  reapUnpaired(): void {
+    for (const deviceId of presenceService.deviceIds()) {
+      if (paired.getPeers(deviceId).length === 0) {
+        presenceService.disconnect(deviceId, 4003, 'no paired peers');
+      }
+    }
+  }
 }
 
 export const signalingService = new SignalingService();

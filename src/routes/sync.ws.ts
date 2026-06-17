@@ -15,7 +15,8 @@ const AUTH_TIMEOUT_MS = 10_000;
 type TrackedSocket = WebSocket & { isAlive?: boolean };
 
 export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
-  // Detect and reap dead connections (NATs silently drop idle TCP sessions).
+  // Detect and reap dead connections (NATs silently drop idle TCP sessions), and
+  // drop sockets whose device has no paired peers (nothing left to sync).
   const heartbeat = setInterval(() => {
     for (const client of app.websocketServer.clients) {
       const socket = client as TrackedSocket;
@@ -26,6 +27,7 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
       socket.isAlive = false;
       socket.ping();
     }
+    signalingService.reapUnpaired();
   }, HEARTBEAT_INTERVAL_MS);
 
   app.addHook('onClose', async () => clearInterval(heartbeat));
@@ -112,6 +114,10 @@ export async function syncWebsocketRoute(app: FastifyInstance): Promise<void> {
           safeSend(socket, { type: 'sync-targets', online, offline });
           break;
         }
+        case 'ready':
+          // A peer we woke is up; relay it to the initiator so it dials now.
+          signalingService.relayReady(publicKey, message.to);
+          break;
         case 'auth':
           // Already authenticated; ignore repeat auth attempts.
           break;
